@@ -1,17 +1,13 @@
 # get-files-list.py
 # Updated version:
-# - During historical scan: for each media message
-#   - If local file exists: compute hash and compare with DB stored hash
-#   - If hash matches → skip (already complete and intact)
-#   - If hash mismatches or no DB entry → reset row (clear completion fields) and queue for re-download
-# - Ensures data integrity: corrupted or modified files are re-downloaded
+# - Removed temporary file cleanup from this script
+# - Cleanup now handled exclusively by download-files.py before processing each file
 
 from telethon import TelegramClient
 from telethon.errors import UsernameNotOccupiedError, ChannelInvalidError, ChannelPrivateError, UsernameInvalidError
 import os
 import asyncio
 import sys
-import glob
 import sqlite3
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -35,45 +31,33 @@ client = TelegramClient('session_name', api_id, api_hash)
 target_entity = None
 target_path = None
 
-def reset_file_entry(message):
-    """Reset completion fields for a message (force re-download)."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE file_status
-        SET prefixed_name = NULL, file_path = NULL, data_hash = NULL, downloaded_at = NULL, started_at = NULL
-        WHERE channel_id = ? AND message_id = ?
-    ''', (message.chat_id, message.id))
-    conn.commit()
-    conn.close()
-
-def verify_and_handle_existing(message):
-    """Check if local file exists and verify hash; reset if mismatch."""
+def mark_as_completed_if_file_exists(message):
     prefixed_name = get_prefixed_filename(message)
     expected_path = os.path.join(target_path, prefixed_name)
 
-    if not os.path.exists(expected_path):
-        return False  # File missing → will be queued
+    if os.path.exists(expected_path):
+        data_hash = compute_file_hash(expected_path)
+        if data_hash is None:
+            return False
 
-    current_hash = compute_file_hash(expected_path)
-    if current_hash is None:
-        reset_file_entry(message)
-        logger.warning(f"Failed to compute hash for existing file {prefixed_name}; will re-download.")
-        return False
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE file_status
+            SET prefixed_name = ?, file_path = ?, data_hash = ?, downloaded_at = ?
+            WHERE channel_id = ? AND message_id = ?
+        ''', (
+            prefixed_name, expected_path, data_hash,
+            datetime.now(timezone.utc).isoformat(),
+            message.chat_id, message.id
+        ))
+        updated = cursor.rowcount > 0
+        conn.commit()
+        conn.close()
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT data_hash, downloaded_at FROM file_status WHERE channel_id = ? AND message_id = ?',
-                   (message.chat_id, message.id))
-    row = cursor.fetchone()
-    conn.close()
-
-    if row and row[0] == current_hash and row[1] is not None:
-        return True  # Valid and complete
-
-    # Mismatch or no hash recorded → reset for re-download
-    reset_file_entry(message)
-    logger.info(f"Hash mismatch or incomplete record for {prefixed_name}; will re-download.")
+        if updated:
+            logger.info(f"Existing file verified and marked complete: {prefixed_name}")
+        return updated
     return False
 
 def insert_or_handle_existing(message):
@@ -86,10 +70,6 @@ def insert_or_handle_existing(message):
 
     if row:
         conn.close()
-        if row[0] is not None:  # Already marked complete
-            if verify_and_handle_existing(message):
-                return  # Valid → skip
-        # Pending or reset → will be queued by caller or later
         return
 
     sender = message.sender
@@ -117,10 +97,7 @@ def insert_or_handle_existing(message):
     conn.commit()
     conn.close()
 
-    if verify_and_handle_existing(message):
-        return
-
-    # New or needs re-download → will be handled by pending queue in downloader
+    mark_as_completed_if_file_exists(message)
 
 async def list_all_channels_and_groups():
     items = []
@@ -195,23 +172,14 @@ async def prepare_download_folder():
     target_path = os.path.join(base_download_path, safe_title)
     os.makedirs(target_path, exist_ok=True)
 
-    temp_files = glob.glob(os.path.join(target_path, '*.tmp'))
-    if temp_files:
-        logger.warning(f"Cleaning up {len(temp_files)} leftover temporary file(s)...")
-        for tf in temp_files:
-            try:
-                os.remove(tf)
-            except Exception as e:
-                logger.error(f"Failed to remove {tf}: {e}")
+    # Cleanup removed — now handled in downloader before each download
 
 async def scan_and_queue():
     logger.info("Scanning historical messages and verifying existing files...")
     processed = 0
-    requeue_count = 0
     async for message in client.iter_messages(target_entity, reverse=True):
         if message.media:
             insert_or_handle_existing(message)
-            # If reset occurred, it will be picked up by downloader's pending load
             processed += 1
 
     logger.info(f"Historical scan complete: {processed} media messages processed.")
