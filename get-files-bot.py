@@ -1,7 +1,8 @@
 # get-files-bot.py
 # Updated version:
-# - Before historical processing, removes any leftover .tmp files in the target folder
-# - Prevents incomplete downloads from previous runs blocking new attempts
+# - File names are now prepended with the sent date/time in YYYY-MM-DD_HH-MM-SS format
+# - Example: 2025-12-30_14-30-45_original_filename.ext
+# - If no original name, uses message ID as fallback
 
 from telethon import TelegramClient, events
 from telethon.errors import UsernameNotOccupiedError, ChannelInvalidError, ChannelPrivateError, UsernameInvalidError
@@ -11,6 +12,7 @@ import re
 import sys
 import glob
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -74,6 +76,20 @@ def sanitize_name(name):
     """Sanitize title for use as folder name."""
     return re.sub(r'[<>:"/\\|?*]', '_', name.strip())
 
+def get_prefixed_filename(message):
+    """Generate filename with date/time prefix."""
+    sent_date = message.date  # datetime object in UTC
+    date_prefix = sent_date.strftime('%Y-%m-%d_%H-%M-%S')
+
+    original_name = message.file.name
+    if original_name:
+        # Sanitize original name if needed (remove invalid chars for filesystem)
+        base_name = ''.join(c if c not in '<>:"/\\|?*' else '_' for c in original_name)
+        return f"{date_prefix}_{base_name}"
+    else:
+        ext = message.file.ext or ''
+        return f"{date_prefix}_file_{message.id}{ext}"
+
 def cleanup_temp_files(folder_path):
     """Remove any leftover .tmp files from previous interrupted downloads."""
     temp_files = glob.glob(os.path.join(folder_path, '*.tmp'))
@@ -93,7 +109,7 @@ async def download_media_safely(message, download_path, semaphore):
     if not message.media:
         return
 
-    file_name = message.file.name or f'file_{message.id}{message.file.ext or ""}'
+    file_name = get_prefixed_filename(message)
     final_path = os.path.join(download_path, file_name)
 
     if os.path.exists(final_path):
