@@ -1,5 +1,5 @@
 # utils.py
-# Shared utilities and constants for get-files-list.py and download-files.py
+# Shared utilities for both scripts
 
 import os
 import re
@@ -8,7 +8,6 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 
-# Configure logging (shared across scripts)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -20,11 +19,9 @@ base_download_path = './downloaded_files'
 DB_PATH = 'telegram_files.db'
 
 def sanitize_name(name):
-    """Sanitize title for use as folder name."""
     return re.sub(r'[<>:"/\\|?*]', '_', name.strip()) if name else None
 
 def get_prefixed_filename(message):
-    """Generate filename with date/time prefix."""
     sent_date = message.date.strftime('%Y-%m-%d_%H-%M-%S')
     original_name = message.file.name
     if original_name:
@@ -35,7 +32,6 @@ def get_prefixed_filename(message):
         return f"{sent_date}_file_{message.id}{ext}"
 
 def compute_file_hash(file_path):
-    """Compute SHA-256 hash of a file."""
     try:
         with open(file_path, 'rb') as f:
             content = f.read()
@@ -45,7 +41,6 @@ def compute_file_hash(file_path):
         return None
 
 def init_db():
-    """Initialize SQLite database and create table if not exists."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -74,7 +69,6 @@ def init_db():
     logger.info(f"Database initialized at {DB_PATH}")
 
 def update_started(message_id, channel_id):
-    """Update started_at timestamp."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -84,7 +78,6 @@ def update_started(message_id, channel_id):
     conn.close()
 
 def update_completed(message_id, channel_id, prefixed_name, file_path, data_hash):
-    """Update completion fields."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''

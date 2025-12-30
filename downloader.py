@@ -1,21 +1,21 @@
-# download-files.py
-# Updated version:
-# - Ensures only one instance runs at a time using a lock file with PID
-# - On startup: checks for existing lock; exits if another instance is running
-# - Creates lock file with current PID
-# - On clean shutdown: removes lock file
+# downloader.py
+# Fixed version:
+# - Removed threading + asyncio.run for workers
+# - Now uses asyncio.create_task for each worker coroutine within the main event loop
+# - Eliminates "event loop must not change" RuntimeError
+# - Keeps single-instance lock and all other features
 
 from telethon import TelegramClient
 import os
 import asyncio
 import sys
-import threading
 import queue
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import argparse
-from utils import init_db, get_prefixed_filename, compute_file_hash, update_started, update_completed, logger, DB_PATH, base_download_path
+from utils import init_db, get_prefixed_filename, compute_file_hash, update_started, update_completed, logger, DB_PATH, base_download_path, sanitize_name
 
 load_dotenv()
 
@@ -26,7 +26,7 @@ if not api_id or not api_hash:
     raise ValueError("Please set TELEGRAM_API_ID and TELEGRAM_API_HASH in the .env file.")
 
 parser = argparse.ArgumentParser(description="Telegram pending media downloader")
-parser.add_argument('--parallel', type=int, default=5, metavar='N', help="Maximum concurrent downloads (default: 5)")
+parser.add_argument('--parallel', type=int, default=3, metavar='N', help="Maximum concurrent downloads (default: 5)")
 
 args = parser.parse_args()
 
@@ -40,7 +40,6 @@ logger.info(f"Maximum concurrent downloads set to: {MAX_CONCURRENT_DOWNLOADS}")
 LOCK_FILE = 'download-files.lock'
 
 def acquire_lock():
-    """Acquire exclusive lock by creating a lock file with PID."""
     if os.path.exists(LOCK_FILE):
         try:
             with open(LOCK_FILE, 'r') as f:
@@ -53,13 +52,12 @@ def acquire_lock():
     try:
         with open(LOCK_FILE, 'w') as f:
             f.write(str(os.getpid()))
-        logger.info("Lock acquired. Starting downloader.")
+        logger.info("Lock acquired.")
     except Exception as e:
         logger.error(f"Failed to create lock file: {e}")
         sys.exit(1)
 
 def release_lock():
-    """Remove the lock file on clean shutdown."""
     if os.path.exists(LOCK_FILE):
         try:
             os.remove(LOCK_FILE)
@@ -70,13 +68,32 @@ def release_lock():
 client = TelegramClient('session_name', api_id, api_hash)
 
 download_queue = queue.Queue()
-stop_event = threading.Event()
+
+def load_all_pending():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT message_id, channel_id,
+               (SELECT channel_title FROM file_status f2 WHERE f2.channel_id = f1.channel_id LIMIT 1) as channel_title
+        FROM file_status f1
+        WHERE downloaded_at IS NULL
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    for message_id, channel_id, channel_title in rows:
+        safe_title = sanitize_name(channel_title or "Unknown")
+        folder_path = os.path.join(base_download_path, safe_title)
+        download_queue.put((message_id, channel_id, folder_path))
+
+    logger.info(f"Loaded {len(rows)} pending downloads into queue.")
 
 async def download_worker():
-    while not stop_event.is_set() or not download_queue.empty():
+    while True:
         try:
-            message_id, channel_id, target_path = download_queue.get(timeout=1)
+            message_id, channel_id, target_path = download_queue.get_nowait()
         except queue.Empty:
+            await asyncio.sleep(1)  # Wait a bit if queue empty
             continue
 
         message = await client.get_messages(channel_id, ids=message_id)
@@ -111,35 +128,20 @@ async def download_worker():
         finally:
             download_queue.task_done()
 
-def load_all_pending():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT message_id, channel_id,
-               (SELECT channel_title FROM file_status f2 WHERE f2.channel_id = f1.channel_id LIMIT 1) as channel_title
-        FROM file_status f1
-        WHERE downloaded_at IS NULL
-    ''')
-    rows = cursor.fetchall()
-    conn.close()
-
-    for message_id, channel_id, channel_title in rows:
-        safe_title = sanitize_name(channel_title or "Unknown")
-        folder_path = os.path.join(base_download_path, safe_title)
-        download_queue.put((message_id, channel_id, folder_path))
-
-    logger.info(f"Loaded {len(rows)} pending downloads into queue.")
-
-def start_download_threads():
-    threads = []
+async def run_workers():
+    tasks = []
     for _ in range(MAX_CONCURRENT_DOWNLOADS):
-        t = threading.Thread(target=asyncio.run, args=(download_worker(),), daemon=True)
-        t.start()
-        threads.append(t)
-    return threads
+        task = asyncio.create_task(download_worker())
+        tasks.append(task)
+
+    # Wait indefinitely (until interrupted)
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        pass
 
 async def main():
-    acquire_lock()  # Ensure single instance
+    acquire_lock()
     init_db()
     await client.start()
     me = await client.get_me()
@@ -152,16 +154,13 @@ async def main():
         await client.disconnect()
         return
 
-    start_download_threads()
     logger.info("Download workers started. Press Ctrl+C to stop.")
+    await run_workers()
 
-    try:
-        await client.run_until_disconnected()
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested...")
-    finally:
-        stop_event.set()
-        release_lock()
+    release_lock()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Shutdown requested...")
