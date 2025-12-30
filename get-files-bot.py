@@ -1,8 +1,8 @@
 # get-files-bot.py
 # Updated version:
-# - File names are now prepended with the sent date/time in YYYY-MM-DD_HH-MM-SS format
-# - Example: 2025-12-30_14-30-45_original_filename.ext
-# - If no original name, uses message ID as fallback
+# - All print statements replaced with structured logging using Python's logging module
+# - Log levels: INFO for normal operations, WARNING for cleanups/skips, ERROR for failures
+# - Logs include timestamps and are output to console (can be redirected if needed)
 
 from telethon import TelegramClient, events
 from telethon.errors import UsernameNotOccupiedError, ChannelInvalidError, ChannelPrivateError, UsernameInvalidError
@@ -11,8 +11,17 @@ import asyncio
 import re
 import sys
 import glob
+import logging
 from dotenv import load_dotenv
 from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,12 +35,12 @@ if not api_id or not api_hash:
 
 # Parse command-line arguments
 if len(sys.argv) < 2 or len(sys.argv) > 5:
-    print("Usage: python get-files-bot.py <target_identifier> [--parallel N]")
-    print("  <target_identifier>: @username, https://t.me/username, or numeric ID")
-    print("  --parallel N      : Maximum concurrent downloads (default: 5)")
-    print("\nExamples:")
-    print("  python get-files-bot.py @durov")
-    print("  python get-files-bot.py -806693599 --parallel 10")
+    logger.error("Usage: python get-files-bot.py <target_identifier> [--parallel N]")
+    logger.error("  <target_identifier>: @username, https://t.me/username, or numeric ID")
+    logger.error("  --parallel N      : Maximum concurrent downloads (default: 5)")
+    logger.error("\nExamples:")
+    logger.error("  python get-files-bot.py @durov")
+    logger.error("  python get-files-bot.py -806693599 --parallel 10")
     sys.exit(1)
 
 # Extract target identifier (first non-option argument)
@@ -45,21 +54,21 @@ i = 2
 while i < len(sys.argv):
     if sys.argv[i] == '--parallel':
         if i + 1 >= len(sys.argv):
-            print("Error: --parallel requires a number")
+            logger.error("--parallel requires a number")
             sys.exit(1)
         try:
             MAX_CONCURRENT_DOWNLOADS = int(sys.argv[i + 1])
             if MAX_CONCURRENT_DOWNLOADS < 1:
                 raise ValueError
         except ValueError:
-            print("Error: --parallel must be followed by a positive integer")
+            logger.error("--parallel must be followed by a positive integer")
             sys.exit(1)
         i += 2
     else:
-        print(f"Unknown argument: {sys.argv[i]}")
+        logger.error(f"Unknown argument: {sys.argv[i]}")
         sys.exit(1)
 
-print(f"Maximum concurrent downloads set to: {MAX_CONCURRENT_DOWNLOADS}")
+logger.info(f"Maximum concurrent downloads set to: {MAX_CONCURRENT_DOWNLOADS}")
 
 # Create the client (personal user account)
 client = TelegramClient('session_name', api_id, api_hash)
@@ -83,7 +92,6 @@ def get_prefixed_filename(message):
 
     original_name = message.file.name
     if original_name:
-        # Sanitize original name if needed (remove invalid chars for filesystem)
         base_name = ''.join(c if c not in '<>:"/\\|?*' else '_' for c in original_name)
         return f"{date_prefix}_{base_name}"
     else:
@@ -94,15 +102,15 @@ def cleanup_temp_files(folder_path):
     """Remove any leftover .tmp files from previous interrupted downloads."""
     temp_files = glob.glob(os.path.join(folder_path, '*.tmp'))
     if temp_files:
-        print(f"Cleaning up {len(temp_files)} leftover temporary file(s)...")
+        logger.warning(f"Cleaning up {len(temp_files)} leftover temporary file(s)...")
         for temp_file in temp_files:
             try:
                 os.remove(temp_file)
-                print(f"Removed: {os.path.basename(temp_file)}")
+                logger.info(f"Removed: {os.path.basename(temp_file)}")
             except Exception as e:
-                print(f"Failed to remove {temp_file}: {e}")
+                logger.error(f"Failed to remove {temp_file}: {e}")
     else:
-        print("No temporary files found.")
+        logger.info("No temporary files found.")
 
 async def download_media_safely(message, download_path, semaphore):
     """Download media with temporary extension, rename on success, skip if final file exists."""
@@ -113,19 +121,19 @@ async def download_media_safely(message, download_path, semaphore):
     final_path = os.path.join(download_path, file_name)
 
     if os.path.exists(final_path):
-        print(f'Skipped (already exists): {file_name}')
+        logger.warning(f'Skipped (already exists): {file_name}')
         return
 
     temp_path = final_path + '.tmp'
 
     async with semaphore:
         try:
-            print(f'Downloading: {file_name}')
+            logger.info(f'Downloading: {file_name}')
             await message.download_media(file=temp_path)
             os.rename(temp_path, final_path)
-            print(f'Successfully saved: {file_name}')
+            logger.info(f'Successfully saved: {file_name}')
         except Exception as e:
-            print(f'Error downloading {file_name}: {e}')
+            logger.error(f'Error downloading {file_name}: {e}')
             if os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
@@ -175,30 +183,30 @@ async def list_all_channels_and_groups():
 
     items.sort(key=lambda x: (type_order.get(x['type'], 5), x['title'].lower()))
 
-    print("\nAccessible channels and groups (sorted by type, then title):")
-    print("=" * 80)
+    logger.info("\nAccessible channels and groups (sorted by type, then title):")
+    logger.info("=" * 80)
     current_type = None
     for item in items:
         if item['type'] != current_type:
-            print(f"\n{item['type']}:")
+            logger.info(f"\n{item['type']}:")
             current_type = item['type']
-        print(f"  • {item['title']} | ID: {item['id']}")
-    print("\n" + "=" * 80)
-    print("To monitor a specific entity, run:")
-    print("python get-files-bot.py <identifier> [--parallel N]\n")
+        logger.info(f"  • {item['title']} | ID: {item['id']}")
+    logger.info("\n" + "=" * 80)
+    logger.info("To monitor a specific entity, run:")
+    logger.info("python get-files-bot.py <identifier> [--parallel N]\n")
 
 async def setup_target(target_identifier):
     global target_entity, target_path
 
-    print(f'Resolving identifier: {target_identifier}')
+    logger.info(f'Resolving identifier: {target_identifier}')
     try:
         target_entity = await client.get_entity(target_identifier)
     except UsernameNotOccupiedError:
-        print(f'Error: The username "{target_identifier}" does not exist.')
+        logger.error(f'The username "{target_identifier}" does not exist.')
         await client.disconnect()
         sys.exit(1)
     except UsernameInvalidError:
-        print(f'Error: Invalid identifier "{target_identifier}".')
+        logger.error(f'Invalid identifier "{target_identifier}".')
         await client.disconnect()
         sys.exit(1)
     except (ChannelInvalidError, ValueError):
@@ -206,20 +214,20 @@ async def setup_target(target_identifier):
             int_id = int(target_identifier)
             target_entity = await client.get_entity(int_id)
         except:
-            print(f'Error: Cannot resolve identifier "{target_identifier}".')
+            logger.error(f'Cannot resolve identifier "{target_identifier}".')
             await client.disconnect()
             sys.exit(1)
     except ChannelPrivateError:
-        print(f'Error: Entity is private or inaccessible.')
+        logger.error('Entity is private or inaccessible.')
         await client.disconnect()
         sys.exit(1)
     except Exception as e:
-        print(f'Error resolving "{target_identifier}": {str(e)}')
+        logger.error(f'Error resolving "{target_identifier}": {str(e)}')
         await client.disconnect()
         sys.exit(1)
 
     title = getattr(target_entity, 'title', "Unknown")
-    print(f'Successfully resolved: "{title}" (ID: {target_entity.id})')
+    logger.info(f'Successfully resolved: "{title}" (ID: {target_entity.id})')
 
     safe_title = sanitize_name(title)
     target_path = os.path.join(base_download_path, safe_title)
@@ -229,7 +237,7 @@ async def setup_target(target_identifier):
     cleanup_temp_files(target_path)
 
     # Historical check with parallel downloads
-    print(f'Checking historical messages for missing files in "{title}" (up to {MAX_CONCURRENT_DOWNLOADS} parallel downloads)...')
+    logger.info(f'Checking historical messages for missing files in "{title}" (up to {MAX_CONCURRENT_DOWNLOADS} parallel downloads)...')
     messages = []
     async for message in client.iter_messages(target_entity, reverse=True):
         messages.append(message)
@@ -240,19 +248,19 @@ async def setup_target(target_identifier):
         batch = messages[i:i + batch_size]
         await process_messages(batch, target_path)
 
-    print(f'Historical check complete. Now monitoring "{title}" for new files. Press Ctrl+C to stop.')
+    logger.info(f'Historical check complete. Now monitoring "{title}" for new files. Press Ctrl+C to stop.')
 
 @client.on(events.NewMessage)
 async def new_file_handler(event):
     if target_entity and event.message.chat_id == target_entity.id and event.message.media:
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
         await download_media_safely(event.message, target_path, semaphore)
-        print(f'New file downloaded from "{getattr(target_entity, 'title', 'target')}"')
+        logger.info(f'New file downloaded from "{getattr(target_entity, 'title', 'target')}"')
 
 async def main():
     await client.start()
     me = await client.get_me()
-    print(f'Logged in as {me.first_name or me.username or "User"} (ID: {me.id})')
+    logger.info(f'Logged in as {me.first_name or me.username or "User"} (ID: {me.id})')
 
     if len(sys.argv) == 1:
         # No arguments → list entities
