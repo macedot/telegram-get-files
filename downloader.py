@@ -181,11 +181,11 @@ async def main():
     cleanup_temp_files_once()
 
     load_all_pending()
-    if download_queue.empty():
-        logger.info("No pending downloads found. Exiting.")
-        release_lock()
-        await client.disconnect()
-        return
+    # if download_queue.empty():
+    #     logger.info("No pending downloads found. Exiting.")
+    #     release_lock()
+    #     await client.disconnect()
+    #     return
 
     logger.info("Download workers started. Press Ctrl+C to stop.")
     await run_workers()
