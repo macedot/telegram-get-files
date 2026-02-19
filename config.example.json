@@ -1,0 +1,9 @@
+{
+  "api_id": 123456,
+  "api_hash": "your_api_hash_here",
+  "session_file": "session.json",
+  "database_path": "telegram_files.db",
+  "download_path": "./downloaded_files",
+  "workers": 5,
+  "log_level": "info"
+}
