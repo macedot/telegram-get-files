@@ -302,7 +302,16 @@ func runDownload(args []string) {
 }
 
 func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegram.Client, cfg *config.Config, log zerolog.Logger, watch bool) error {
+	batchNum := 0
+
 	for {
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("Context cancelled, stopping download")
+			return nil
+		default:
+		}
+
 		files, err := database.GetPendingFiles()
 		if err != nil {
 			return fmt.Errorf("failed to get pending files: %w", err)
@@ -318,11 +327,13 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 			continue
 		}
 
-		log.Info().Int("count", len(files)).Msg("Starting downloads")
+		batchNum++
+		log.Info().Int("batch", batchNum).Int("count", len(files)).Msg("Starting downloads")
 
-		poolCtx := context.Background()
+		api := tgClient.Raw().API()
+		poolCtx, poolCancel := context.WithCancel(context.Background())
 		pool := downloader.NewPool(cfg.Workers, database, poolCtx).
-			WithClient(tgClient.Raw().API()).
+			WithClient(api).
 			WithDownloadPath(cfg.DownloadPath)
 
 		pool.Start()
@@ -346,14 +357,25 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 		}
 
 		pool.Stop()
+		poolCancel()
 
 		log.Info().Msg("Downloads complete")
 
 		if !watch {
-			return nil
+			remaining, err := database.GetPendingFiles()
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to check remaining files")
+				return nil
+			}
+			if len(remaining) == 0 {
+				fmt.Println("All pending files downloaded.")
+				return nil
+			}
+			log.Info().Int("remaining", len(remaining)).Int("batch", batchNum).Msg("More files pending, waiting before continuing...")
+			time.Sleep(3 * time.Second)
+		} else {
+			log.Info().Int("poll_interval", cfg.DownloadPollInterval).Msg("Waiting for new files...")
+			time.Sleep(time.Duration(cfg.DownloadPollInterval) * time.Second)
 		}
-
-		log.Info().Int("poll_interval", cfg.DownloadPollInterval).Msg("Waiting for new files...")
-		time.Sleep(time.Duration(cfg.DownloadPollInterval) * time.Second)
 	}
 }
