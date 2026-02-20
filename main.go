@@ -62,11 +62,13 @@ func printUsage() {
 	fmt.Println("  -source=id      Channel/group ID or username to scan")
 	fmt.Println("  -list           List available channels and groups")
 	fmt.Println("  -watch          Continuously watch for new files")
+	fmt.Println("  -force          Reset file status before scanning")
 	fmt.Println()
 	fmt.Println("Download command options:")
 	fmt.Println("  -config=path    Path to configuration file (default: config.json)")
 	fmt.Println("  -workers=n      Number of concurrent downloads (default: 5)")
-	fmt.Println("  -watch         Continuously watch for new pending files")
+	fmt.Println("  -watch          Continuously watch for new pending files")
+	fmt.Println("  -force          Reset file status before downloading")
 }
 
 func runScan(args []string) {
@@ -75,6 +77,7 @@ func runScan(args []string) {
 	source := fs.String("source", "", "Channel/group ID or username to scan")
 	listOnly := fs.Bool("list", false, "List available channels and groups only")
 	watch := fs.Bool("watch", false, "Continuously watch for new files")
+	force := fs.Bool("force", false, "Reset file status before scanning")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -101,6 +104,15 @@ func runScan(args []string) {
 	if err := database.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing database: %v\n", err)
 		os.Exit(1)
+	}
+
+	if *force {
+		log.Info().Msg("Resetting file status...")
+		if err := database.ResetStatus(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resetting status: %v\n", err)
+			os.Exit(1)
+		}
+		log.Info().Msg("File status reset complete")
 	}
 
 	// Initialize Telegram client
@@ -225,6 +237,7 @@ func runDownload(args []string) {
 	configPath := fs.String("config", "config.json", "Path to configuration file")
 	workers := fs.Int("workers", 0, "Number of concurrent downloads (0 = use config value)")
 	watch := fs.Bool("watch", false, "Continuously watch for new pending files")
+	force := fs.Bool("force", false, "Reset file status before downloading")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -250,6 +263,20 @@ func runDownload(args []string) {
 		os.Exit(1)
 	}
 	defer database.Close()
+
+	if err := database.Init(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error initializing database: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *force {
+		log.Info().Msg("Resetting file status...")
+		if err := database.ResetStatus(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error resetting status: %v\n", err)
+			os.Exit(1)
+		}
+		log.Info().Msg("File status reset complete")
+	}
 
 	tgClient := telegram.NewClient(cfg)
 
@@ -301,6 +328,10 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 		pool.Start()
 
 		for _, file := range files {
+			var filePath string
+			if file.FilePath != nil {
+				filePath = *file.FilePath
+			}
 			task := &models.DownloadTask{
 				MessageID:    file.MessageID,
 				ChannelID:    file.ChannelID,
@@ -309,6 +340,7 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 				FileSize:     file.FileSize,
 				OriginalName: file.OriginalName,
 				FileID:       file.FileID,
+				FilePath:     filePath,
 			}
 			pool.Submit(task)
 		}

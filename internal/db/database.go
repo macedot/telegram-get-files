@@ -111,6 +111,7 @@ func (d *DB) InsertFile(file *models.FileInfo) error {
 }
 
 // GetPendingFiles returns all files that haven't been downloaded yet.
+// Includes files with started_at set but no downloaded_at (stuck/incomplete downloads).
 func (d *DB) GetPendingFiles() ([]*models.FileInfo, error) {
 	query := `
 	SELECT id, created_at, channel_id, channel_title, message_id,
@@ -390,6 +391,22 @@ func (d *DB) UpdateFailed(channelID int64, messageID int) error {
 
 	if err != nil {
 		return fmt.Errorf("failed to update failed: %w", err)
+	}
+
+	return nil
+}
+
+// ResetStatus resets all file statuses to pending (clears started_at and downloaded_at).
+func (d *DB) ResetStatus() error {
+	query := `
+	UPDATE file_status
+	SET started_at = NULL, downloaded_at = NULL, file_path = NULL, data_hash = NULL
+	WHERE downloaded_at IS NOT NULL OR started_at IS NOT NULL
+	`
+
+	_, err := d.conn.Exec(query)
+	if err != nil {
+		return fmt.Errorf("failed to reset status: %w", err)
 	}
 
 	return nil

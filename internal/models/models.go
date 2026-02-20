@@ -12,13 +12,13 @@ type Channel struct {
 
 // MediaMessage represents a message containing media (file, photo, video, etc.).
 type MediaMessage struct {
-	MessageID  int
-	ChannelID  int64
-	SenderID   *int64 // nullable
-	FileName   string
-	FileSize   int64
-	Date       time.Time
-	FileID     string
+	MessageID    int
+	ChannelID    int64
+	SenderID     *int64 // nullable
+	FileName     string
+	FileSize     int64
+	Date         time.Time
+	FileID       string
 	ChannelTitle string
 }
 
@@ -31,6 +31,7 @@ type DownloadTask struct {
 	FileSize     int64
 	OriginalName string
 	FileID       string
+	FilePath     string
 }
 
 // FileInfo represents a file record in the database.
@@ -58,8 +59,8 @@ type FileInfo struct {
 type FileStatus string
 
 const (
-	StatusPending    FileStatus = "pending"
-	StatusStarted    FileStatus = "started"
-	StatusCompleted  FileStatus = "completed"
-	StatusFailed     FileStatus = "failed"
+	StatusPending   FileStatus = "pending"
+	StatusStarted   FileStatus = "started"
+	StatusCompleted FileStatus = "completed"
+	StatusFailed    FileStatus = "failed"
 )

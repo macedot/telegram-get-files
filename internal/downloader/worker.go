@@ -113,6 +113,16 @@ func (p *Pool) downloadTask(task *models.DownloadTask) error {
 		return fmt.Errorf("download path not set")
 	}
 
+	if task.FilePath != "" && FileExists(task.FilePath) {
+		log.Info().Str("file", task.FilePath).Msg("File already exists in database path, marking as complete")
+		if p.db != nil {
+			if err := p.db.UpdateCompleted(task.ChannelID, task.MessageID, task.FileName, task.FilePath, ""); err != nil {
+				log.Error().Err(err).Int("message_id", task.MessageID).Msg("Failed to update database")
+			}
+		}
+		return nil
+	}
+
 	doc, err := p.fetchFreshDocument(task)
 	if err != nil {
 		log.Error().Err(err).Int("message_id", task.MessageID).Msg("Failed to fetch fresh document")
