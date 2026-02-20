@@ -25,6 +25,9 @@ func New(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
+	conn.Exec("PRAGMA busy_timeout = 5000")
+	conn.Exec("PRAGMA journal_mode = WAL")
+
 	return &DB{conn: conn}, nil
 }
 

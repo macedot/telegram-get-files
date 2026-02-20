@@ -293,7 +293,8 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 
 		log.Info().Int("count", len(files)).Msg("Starting downloads")
 
-		pool := downloader.NewPool(cfg.Workers, database, ctx).
+		poolCtx := context.Background()
+		pool := downloader.NewPool(cfg.Workers, database, poolCtx).
 			WithClient(tgClient.Raw().API()).
 			WithDownloadPath(cfg.DownloadPath)
 

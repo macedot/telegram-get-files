@@ -151,7 +151,10 @@ func (p *Pool) downloadTask(task *models.DownloadTask) error {
 	defer file.Close()
 
 	log.Debug().Int64("file_id", doc.ID).Int64("access_hash", doc.AccessHash).Msg("Starting file download")
-	_, err = downloader.NewDownloader().Download(p.api, location).Stream(p.ctx, file)
+
+	downloadCtx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	_, err = downloader.NewDownloader().Download(p.api, location).Stream(downloadCtx, file)
 
 	if err != nil {
 		os.Remove(tempPath)
@@ -214,7 +217,10 @@ func EnsureDir(path string) error {
 
 // fetchFreshDocument fetches the current document from Telegram to get fresh file reference.
 func (p *Pool) fetchFreshDocument(task *models.DownloadTask) (*tg.Document, error) {
-	msgs, err := p.api.MessagesGetMessages(p.ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: task.MessageID}})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	msgs, err := p.api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: task.MessageID}})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get message: %w", err)
 	}
