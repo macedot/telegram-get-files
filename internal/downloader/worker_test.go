@@ -442,3 +442,90 @@ func TestValidatePath_NonexistentBaseDir(t *testing.T) {
 	err := validatePath("/tmp/nonexistent/file.txt", "/tmp/nonexistent")
 	assert.NoError(t, err)
 }
+
+// MockDatabase implements db.Database for testing
+type MockDatabase struct {
+	updateFailedErr    error
+	updateCompletedErr error
+}
+
+func (m *MockDatabase) Init() error                                  { return nil }
+func (m *MockDatabase) InsertFile(file *models.FileInfo) error       { return nil }
+func (m *MockDatabase) GetPendingFiles() ([]*models.FileInfo, error) { return nil, nil }
+func (m *MockDatabase) GetByChannelMessage(channelID int64, messageID int) (*models.FileInfo, error) {
+	return nil, nil
+}
+func (m *MockDatabase) GetOrCreateFile(file *models.FileInfo) (*models.FileInfo, bool, error) {
+	return file, true, nil
+}
+func (m *MockDatabase) GetOrCreateOrUpdateFile(file *models.FileInfo) (*models.FileInfo, bool, bool, error) {
+	return file, true, false, nil
+}
+func (m *MockDatabase) UpdateFile(file *models.FileInfo) error             { return nil }
+func (m *MockDatabase) UpdateStarted(channelID int64, messageID int) error { return nil }
+func (m *MockDatabase) UpdateCompleted(channelID int64, messageID int, prefixedName, filePath, dataHash string) error {
+	return m.updateCompletedErr
+}
+func (m *MockDatabase) UpdateFailed(channelID int64, messageID int) error {
+	return m.updateFailedErr
+}
+func (m *MockDatabase) ResetStatus() error { return nil }
+func (m *MockDatabase) Close() error       { return nil }
+
+func TestPool_WithDB(t *testing.T) {
+	mockDB := &MockDatabase{}
+	ctx := context.Background()
+	pool := NewPool(1, mockDB, ctx).WithDB(mockDB)
+
+	assert.NotNil(t, pool)
+	assert.Equal(t, 1, pool.workers)
+}
+
+func TestPool_WithClient(t *testing.T) {
+	database, err := db.New(":memory:")
+	require.NoError(t, err)
+	defer database.Close()
+
+	ctx := context.Background()
+	pool := NewPool(1, database, ctx)
+
+	// WithClient should return the same pool for chaining
+	result := pool.WithClient(nil)
+	assert.Same(t, pool, result)
+}
+
+func TestPool_SubmitReturnsErrorWhenStopped(t *testing.T) {
+	database, err := db.New(":memory:")
+	require.NoError(t, err)
+	defer database.Close()
+
+	ctx := context.Background()
+	pool := NewPool(1, database, ctx)
+	pool.Start()
+	pool.Stop()
+
+	// Submit should return error after stop
+	err = pool.Submit(&models.DownloadTask{MessageID: 1})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "stopped")
+}
+
+func TestPool_SubmitContextCancellation(t *testing.T) {
+	database, err := db.New(":memory:")
+	require.NoError(t, err)
+	defer database.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := NewPool(1, database, ctx)
+	pool.Start()
+
+	// Cancel context
+	cancel()
+
+	// Give goroutine time to process cancellation
+	time.Sleep(10 * time.Millisecond)
+
+	// Submit should return context error
+	err = pool.Submit(&models.DownloadTask{MessageID: 1})
+	assert.Error(t, err)
+}
