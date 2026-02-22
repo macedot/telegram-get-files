@@ -86,11 +86,11 @@ func (p *Pool) Stop() {
 // Returns error if pool is stopped or context cancelled.
 func (p *Pool) Submit(task *models.DownloadTask) error {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.stopped {
-		p.mu.Unlock()
 		return fmt.Errorf("pool is stopped")
 	}
-	p.mu.Unlock()
 
 	select {
 	case p.queue <- task:
@@ -262,12 +262,9 @@ func sanitizeFilename(name string) string {
 	// Replace control characters with underscores
 	result := strings.Builder{}
 	for _, r := range name {
-		switch {
-		case unicode.IsControl(r):
+		if unicode.IsControl(r) {
 			result.WriteRune('_')
-		case r == 0:
-			result.WriteRune('_')
-		default:
+		} else {
 			result.WriteRune(r)
 		}
 	}

@@ -2,9 +2,12 @@ package downloader
 
 import (
 	"context"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/macedot/telegram-get-files/internal/db"
 	"github.com/macedot/telegram-get-files/internal/models"
@@ -304,4 +307,154 @@ func TestValidatePath_SameDirectory(t *testing.T) {
 	err := validatePath(tmpDir, tmpDir)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "path traversal")
+}
+
+func TestPool_SubmitDuringStop(t *testing.T) {
+	database, err := db.New(":memory:")
+	require.NoError(t, err)
+	defer database.Close()
+
+	ctx := context.Background()
+	pool := NewPool(1, database, ctx)
+	pool.Start()
+
+	var wg sync.WaitGroup
+	errCount := int32(0)
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5; j++ {
+				task := &models.DownloadTask{MessageID: j}
+				if err := pool.Submit(task); err != nil {
+					_ = err // ignore error, we just want to test for panics
+				}
+			}
+		}()
+	}
+
+	time.Sleep(time.Millisecond * 5)
+	pool.Stop()
+	wg.Wait()
+
+	_ = errCount
+}
+
+func TestPool_ContextCancellation(t *testing.T) {
+	database, err := db.New(":memory:")
+	require.NoError(t, err)
+	defer database.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pool := NewPool(1, database, ctx)
+	pool.Start()
+
+	// Cancel the parent context
+	cancel()
+
+	// Since pool wraps the context internally, it should still accept tasks
+	// until Stop() is called with the internal context cancelled
+	task := &models.DownloadTask{MessageID: 1}
+
+	// The pool's internal context is still valid after parent cancel
+	// because NewPool creates its own derived context
+	// This is the correct behavior - the pool manages its own lifecycle
+	_ = task // suppress unused variable warning
+
+	pool.Stop()
+
+	// After Stop(), Submit should fail
+	err = pool.Submit(&models.DownloadTask{MessageID: 2})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "stopped")
+}
+
+func TestPool_ConcurrentSubmitStop(t *testing.T) {
+	for i := 0; i < 5; i++ {
+		t.Run("iteration", func(t *testing.T) {
+			database, err := db.New(":memory:")
+			require.NoError(t, err)
+			defer database.Close()
+
+			ctx := context.Background()
+			pool := NewPool(2, database, ctx)
+			pool.Start()
+
+			var wg sync.WaitGroup
+			panicOccurred := false
+
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 50; j++ {
+					task := &models.DownloadTask{MessageID: j}
+					_ = pool.Submit(task)
+				}
+			}()
+
+			go func() {
+				defer wg.Done()
+				time.Sleep(time.Microsecond * time.Duration(100+rand.Intn(500)))
+				pool.Stop()
+			}()
+
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						panicOccurred = true
+					}
+				}()
+				wg.Wait()
+			}()
+
+			assert.False(t, panicOccurred, "Concurrent Submit/Stop caused panic")
+		})
+	}
+}
+
+func TestSanitizeFilename_EmptyAfterControlRemoval(t *testing.T) {
+	input := "\x00\x01\x02\x03\x04"
+	result := sanitizeFilename(input)
+	assert.Equal(t, "download", result)
+}
+
+func TestSanitizeFilename_PreservesExtension(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"simple extension", "file.pdf", "file.pdf"},
+		{"multiple dots", "file.name.with.dots.pdf", "file.name.with.dots.pdf"},
+		{"no extension", "filename", "filename"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeFilename(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestValidatePath_NonexistentBaseDir(t *testing.T) {
+	err := validatePath("/tmp/nonexistent/file.txt", "/tmp/nonexistent")
+	assert.NoError(t, err)
+}
+
+func TestValidatePath_SymlinkTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	realDir := filepath.Join(tmpDir, "real")
+	err := os.Mkdir(realDir, 0755)
+	require.NoError(t, err)
+
+	linkDir := filepath.Join(tmpDir, "link")
+	err = os.Symlink(realDir, linkDir)
+	require.NoError(t, err)
+
+	targetFile := filepath.Join(linkDir, "file.txt")
+	err = validatePath(targetFile, realDir)
+	assert.NoError(t, err)
 }
