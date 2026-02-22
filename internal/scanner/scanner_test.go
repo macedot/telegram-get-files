@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gotd/td/tg"
+	"github.com/macedot/telegram-get-files/internal/models"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -120,9 +121,9 @@ func TestScanner_ScanChannel(t *testing.T) {
 
 	scanner := New(client)
 
-	var foundTasks []*DownloadTask
+	var foundTasks []*models.DownloadTask
 	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
-	err := scanner.ScanChannel(context.Background(), resolved, func(task *DownloadTask) {
+	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
 
@@ -154,9 +155,9 @@ func TestScanner_ScanChannel_Photo(t *testing.T) {
 
 	scanner := New(client)
 
-	var foundTasks []*DownloadTask
+	var foundTasks []*models.DownloadTask
 	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
-	err := scanner.ScanChannel(context.Background(), resolved, func(task *DownloadTask) {
+	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
 
@@ -177,9 +178,9 @@ func TestScanner_ScanChannel_EmptyHistory(t *testing.T) {
 
 	scanner := New(client)
 
-	var foundTasks []*DownloadTask
+	var foundTasks []*models.DownloadTask
 	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
-	err := scanner.ScanChannel(context.Background(), resolved, func(task *DownloadTask) {
+	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
 
@@ -204,9 +205,9 @@ func TestScanner_ScanChannel_NonMediaMessage(t *testing.T) {
 
 	scanner := New(client)
 
-	var foundTasks []*DownloadTask
+	var foundTasks []*models.DownloadTask
 	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
-	err := scanner.ScanChannel(context.Background(), resolved, func(task *DownloadTask) {
+	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
 
@@ -232,9 +233,9 @@ func TestScanner_ScanChannel_IgnoresNonDocumentPhoto(t *testing.T) {
 
 	scanner := New(client)
 
-	var foundTasks []*DownloadTask
+	var foundTasks []*models.DownloadTask
 	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
-	err := scanner.ScanChannel(context.Background(), resolved, func(task *DownloadTask) {
+	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
 
@@ -268,7 +269,7 @@ func TestScanner_ScanChannel_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := scanner.ScanChannel(ctx, resolved, func(task *DownloadTask) {})
+	err := scanner.ScanChannel(ctx, resolved, func(task *models.DownloadTask) {})
 
 	assert.Error(t, err)
 }

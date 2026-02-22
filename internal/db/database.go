@@ -9,6 +9,22 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Database defines the interface for database operations.
+type Database interface {
+	Init() error
+	InsertFile(file *models.FileInfo) error
+	GetPendingFiles() ([]*models.FileInfo, error)
+	GetByChannelMessage(channelID int64, messageID int) (*models.FileInfo, error)
+	GetOrCreateFile(file *models.FileInfo) (*models.FileInfo, bool, error)
+	GetOrCreateOrUpdateFile(file *models.FileInfo) (*models.FileInfo, bool, bool, error)
+	UpdateFile(file *models.FileInfo) error
+	UpdateStarted(channelID int64, messageID int) error
+	UpdateCompleted(channelID int64, messageID int, prefixedName, filePath, dataHash string) error
+	UpdateFailed(channelID int64, messageID int) error
+	ResetStatus() error
+	Close() error
+}
+
 // DB wraps the database connection.
 type DB struct {
 	conn *sql.DB
@@ -25,8 +41,12 @@ func New(path string) (*DB, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	conn.Exec("PRAGMA busy_timeout = 5000")
-	conn.Exec("PRAGMA journal_mode = WAL")
+	if _, err := conn.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+	if _, err := conn.Exec("PRAGMA journal_mode = WAL"); err != nil {
+		return nil, fmt.Errorf("failed to set journal_mode: %w", err)
+	}
 
 	return &DB{conn: conn}, nil
 }
@@ -166,6 +186,12 @@ func (d *DB) GetPendingFiles() ([]*models.FileInfo, error) {
 		if fileSize.Valid {
 			file.FileSize = fileSize.Int64
 		}
+		if senderID.Valid {
+			file.SenderID = &senderID.Int64
+		}
+		if senderUsername.Valid {
+			file.SenderUsername = &senderUsername.String
+		}
 		if createdAt.Valid {
 			if t, err := time.Parse(time.RFC3339, createdAt.String); err == nil {
 				file.CreatedAt = t
@@ -175,6 +201,22 @@ func (d *DB) GetPendingFiles() ([]*models.FileInfo, error) {
 			if t, err := time.Parse(time.RFC3339, sentAt.String); err == nil {
 				file.SentAt = t
 			}
+		}
+		if startedAt.Valid {
+			if t, err := time.Parse(time.RFC3339, startedAt.String); err == nil {
+				file.StartedAt = &t
+			}
+		}
+		if downloadedAt.Valid {
+			if t, err := time.Parse(time.RFC3339, downloadedAt.String); err == nil {
+				file.DownloadedAt = &t
+			}
+		}
+		if filePath.Valid {
+			file.FilePath = &filePath.String
+		}
+		if dataHash.Valid {
+			file.DataHash = &dataHash.String
 		}
 
 		files = append(files, file)

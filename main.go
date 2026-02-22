@@ -150,7 +150,11 @@ func runScan(args []string) {
 		log.Info().Str("source", *source).Msg("Starting scan")
 
 		// Parse source (channel/group ID or username)
-		s := scanner.NewWithDBAndClient(scanner.NewAdapter(tgClient.Raw()), database, tgClient.Raw().API())
+		s := scanner.New(
+			scanner.NewAdapter(tgClient.Raw()),
+			scanner.WithDB(database),
+			scanner.WithRawClient(tgClient.Raw().API()),
+		)
 
 		// Resolve the source (handles usernames, peer IDs like -100XXX, and numeric IDs)
 		resolvedChannel, err := s.ResolveChannelWithHash(ctx, *source)
@@ -164,7 +168,7 @@ func runScan(args []string) {
 		var found, added, updated int
 
 		// Process each file as it's found during scan
-		processFile := func(task *scanner.DownloadTask) {
+		processFile := func(task *models.DownloadTask) {
 			found++
 			log.Debug().Str("file", task.FileName).Int64("size", task.FileSize).Int("message_id", task.MessageID).Msg("Found file")
 
@@ -202,7 +206,7 @@ func runScan(args []string) {
 		// Watch mode
 		if *watch {
 			log.Info().Int("poll_interval", cfg.ScanPollInterval).Msg("Watching for new files...")
-			watchCallback := func(task *scanner.DownloadTask) {
+			watchCallback := func(task *models.DownloadTask) {
 				log.Debug().Str("file", task.FileName).Int("message_id", task.MessageID).Msg("New file detected in watch mode")
 				processFile(task)
 			}

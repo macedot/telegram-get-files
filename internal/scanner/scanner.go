@@ -44,35 +44,30 @@ type Scanner struct {
 	db        *db.DB
 }
 
+// Option is a functional option for configuring Scanner.
+type Option func(*Scanner)
+
+// WithDB sets the database for the scanner.
+func WithDB(database *db.DB) Option {
+	return func(s *Scanner) {
+		s.db = database
+	}
+}
+
+// WithRawClient sets the raw tg.Client for peer resolution.
+func WithRawClient(rawClient *tg.Client) Option {
+	return func(s *Scanner) {
+		s.rawClient = rawClient
+	}
+}
+
 // New creates a new scanner instance.
-func New(client DialogClient) *Scanner {
-	return &Scanner{client: client}
-}
-
-// NewWithDB creates a new scanner instance with database support.
-func NewWithDB(client DialogClient, database *db.DB) *Scanner {
-	return &Scanner{client: client, db: database}
-}
-
-// NewWithClient creates a new scanner instance with raw tg.Client for peer resolution.
-func NewWithClient(client DialogClient, rawClient *tg.Client) *Scanner {
-	return &Scanner{client: client, rawClient: rawClient}
-}
-
-// NewWithDBAndClient creates a new scanner instance with database and raw client.
-func NewWithDBAndClient(client DialogClient, database *db.DB, rawClient *tg.Client) *Scanner {
-	return &Scanner{client: client, db: database, rawClient: rawClient}
-}
-
-// DownloadTask represents a work item in the download queue.
-type DownloadTask struct {
-	MessageID    int
-	ChannelID    int64
-	ChannelTitle string
-	FileName     string
-	FileSize     int64
-	OriginalName string
-	FileID       string
+func New(client DialogClient, opts ...Option) *Scanner {
+	s := &Scanner{client: client}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // ListChannels retrieves all accessible channels and groups.
@@ -121,22 +116,11 @@ func (s *Scanner) ListChannels(ctx context.Context) ([]*models.Channel, error) {
 }
 
 // ScanChannel scans a channel for media files and processes each file via callback.
-func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, onFile func(*DownloadTask)) error {
+func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, onFile func(*models.DownloadTask)) error {
 	log := logger.GetLogger()
 	log.Info().Int64("channel_id", resolved.ChannelID).Int64("access_hash", resolved.AccessHash).Msg("Scanning channel...")
 
-	var inputPeer tg.InputPeerClass
-	if resolved.IsChannel {
-		inputPeer = &tg.InputPeerChannel{
-			ChannelID:  resolved.ChannelID,
-			AccessHash: resolved.AccessHash,
-		}
-	} else {
-		// Basic group
-		inputPeer = &tg.InputPeerChat{
-			ChatID: resolved.ChannelID,
-		}
-	}
+	inputPeer := s.buildInputPeer(resolved)
 
 	totalCount := 0
 	offsetID := 0
@@ -158,16 +142,9 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 			return fmt.Errorf("failed to get history: %w", err)
 		}
 
-		var messages []tg.MessageClass
-		switch h := history.(type) {
-		case *tg.MessagesChannelMessages:
-			messages = h.Messages
-		case *tg.MessagesMessagesSlice:
-			messages = h.Messages
-		case *tg.MessagesMessages:
-			messages = h.Messages
-		default:
-			return fmt.Errorf("unexpected history type: %T", history)
+		messages, err := s.extractMessages(history)
+		if err != nil {
+			return err
 		}
 
 		if len(messages) == 0 {
@@ -220,21 +197,11 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 
 // Watch listens for new messages with media in a channel/group.
 // pollInterval is in seconds.
-func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInterval int, onFile func(*DownloadTask)) error {
+func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInterval int, onFile func(*models.DownloadTask)) error {
 	log := logger.GetLogger()
 	log.Info().Int64("channel_id", resolved.ChannelID).Int("poll_interval", pollInterval).Msg("Watching for new files...")
 
-	var inputPeer tg.InputPeerClass
-	if resolved.IsChannel {
-		inputPeer = &tg.InputPeerChannel{
-			ChannelID:  resolved.ChannelID,
-			AccessHash: resolved.AccessHash,
-		}
-	} else {
-		inputPeer = &tg.InputPeerChat{
-			ChatID: resolved.ChannelID,
-		}
-	}
+	inputPeer := s.buildInputPeer(resolved)
 
 	lastMessageID := 0
 
@@ -256,15 +223,8 @@ func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInte
 			continue
 		}
 
-		var messages []tg.MessageClass
-		switch h := history.(type) {
-		case *tg.MessagesChannelMessages:
-			messages = h.Messages
-		case *tg.MessagesMessagesSlice:
-			messages = h.Messages
-		case *tg.MessagesMessages:
-			messages = h.Messages
-		default:
+		messages, err := s.extractMessages(history)
+		if err != nil {
 			log.Warn().Str("type", fmt.Sprintf("%T", history)).Msg("Unknown history type")
 			select {
 			case <-ctx.Done():
@@ -318,12 +278,12 @@ func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInte
 }
 
 // extractMediaInfo extracts file information from a message.
-func extractMediaInfo(message *tg.Message, channelID int64) *DownloadTask {
+func extractMediaInfo(message *tg.Message, channelID int64) *models.DownloadTask {
 	if message.Media == nil {
 		return nil
 	}
 
-	task := &DownloadTask{
+	task := &models.DownloadTask{
 		MessageID: message.ID,
 		ChannelID: channelID,
 	}
@@ -498,4 +458,31 @@ func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*Re
 	}
 
 	return nil, fmt.Errorf("chat not found with ID: %d", id)
+}
+
+// buildInputPeer constructs the appropriate InputPeer for the given resolved channel.
+func (s *Scanner) buildInputPeer(resolved *ResolvedChannel) tg.InputPeerClass {
+	if resolved.IsChannel {
+		return &tg.InputPeerChannel{
+			ChannelID:  resolved.ChannelID,
+			AccessHash: resolved.AccessHash,
+		}
+	}
+	return &tg.InputPeerChat{
+		ChatID: resolved.ChannelID,
+	}
+}
+
+// extractMessages extracts message list from the history response.
+func (s *Scanner) extractMessages(history tg.MessagesMessagesClass) ([]tg.MessageClass, error) {
+	switch h := history.(type) {
+	case *tg.MessagesChannelMessages:
+		return h.Messages, nil
+	case *tg.MessagesMessagesSlice:
+		return h.Messages, nil
+	case *tg.MessagesMessages:
+		return h.Messages, nil
+	default:
+		return nil, fmt.Errorf("unexpected history type: %T", history)
+	}
 }
