@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/macedot/telegram-get-files/internal/logger"
 	"github.com/macedot/telegram-get-files/internal/models"
 	_ "modernc.org/sqlite"
 )
@@ -28,6 +29,24 @@ type Database interface {
 // DB wraps the database connection.
 type DB struct {
 	conn *sql.DB
+}
+
+// parseNullableTime parses a nullable time string and logs warnings for parse failures.
+func parseNullableTime(ns sql.NullString, fieldName string) (time.Time, bool) {
+	if !ns.Valid {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, ns.String)
+	if err != nil {
+		log := logger.GetLogger()
+		log.Warn().
+			Err(err).
+			Str("field", fieldName).
+			Str("value", ns.String).
+			Msg("Failed to parse timestamp, using zero value")
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // New creates a new database connection.
@@ -166,7 +185,7 @@ func (d *DB) GetPendingFiles() ([]*models.FileInfo, error) {
 			return nil, fmt.Errorf("failed to scan file row: %w", err)
 		}
 
-		file := &models.FileInfo{
+	file := &models.FileInfo{
 			ID:        id,
 			ChannelID: rowChannelID,
 			MessageID: rowMessageID,
@@ -192,25 +211,17 @@ func (d *DB) GetPendingFiles() ([]*models.FileInfo, error) {
 		if senderUsername.Valid {
 			file.SenderUsername = &senderUsername.String
 		}
-		if createdAt.Valid {
-			if t, err := time.Parse(time.RFC3339, createdAt.String); err == nil {
-				file.CreatedAt = t
-			}
+		if t, ok := parseNullableTime(createdAt, "created_at"); ok {
+			file.CreatedAt = t
 		}
-		if sentAt.Valid {
-			if t, err := time.Parse(time.RFC3339, sentAt.String); err == nil {
-				file.SentAt = t
-			}
+		if t, ok := parseNullableTime(sentAt, "sent_at"); ok {
+			file.SentAt = t
 		}
-		if startedAt.Valid {
-			if t, err := time.Parse(time.RFC3339, startedAt.String); err == nil {
-				file.StartedAt = &t
-			}
+		if t, ok := parseNullableTime(startedAt, "started_at"); ok {
+			file.StartedAt = &t
 		}
-		if downloadedAt.Valid {
-			if t, err := time.Parse(time.RFC3339, downloadedAt.String); err == nil {
-				file.DownloadedAt = &t
-			}
+		if t, ok := parseNullableTime(downloadedAt, "downloaded_at"); ok {
+			file.DownloadedAt = &t
 		}
 		if filePath.Valid {
 			file.FilePath = &filePath.String
@@ -278,15 +289,11 @@ func (d *DB) GetByChannelMessage(channelID int64, messageID int) (*models.FileIn
 	if fileSize.Valid {
 		file.FileSize = fileSize.Int64
 	}
-	if createdAt.Valid {
-		if t, err := time.Parse(time.RFC3339, createdAt.String); err == nil {
-			file.CreatedAt = t
-		}
+	if t, ok := parseNullableTime(createdAt, "created_at"); ok {
+		file.CreatedAt = t
 	}
-	if sentAt.Valid {
-		if t, err := time.Parse(time.RFC3339, sentAt.String); err == nil {
-			file.SentAt = t
-		}
+	if t, ok := parseNullableTime(sentAt, "sent_at"); ok {
+		file.SentAt = t
 	}
 
 	return file, nil

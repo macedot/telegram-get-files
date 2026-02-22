@@ -122,7 +122,7 @@ func TestScanner_ScanChannel(t *testing.T) {
 	scanner := New(client)
 
 	var foundTasks []*models.DownloadTask
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
@@ -156,7 +156,7 @@ func TestScanner_ScanChannel_Photo(t *testing.T) {
 	scanner := New(client)
 
 	var foundTasks []*models.DownloadTask
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
@@ -179,7 +179,7 @@ func TestScanner_ScanChannel_EmptyHistory(t *testing.T) {
 	scanner := New(client)
 
 	var foundTasks []*models.DownloadTask
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
@@ -206,7 +206,7 @@ func TestScanner_ScanChannel_NonMediaMessage(t *testing.T) {
 	scanner := New(client)
 
 	var foundTasks []*models.DownloadTask
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
@@ -234,7 +234,7 @@ func TestScanner_ScanChannel_IgnoresNonDocumentPhoto(t *testing.T) {
 	scanner := New(client)
 
 	var foundTasks []*models.DownloadTask
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	err := scanner.ScanChannel(context.Background(), resolved, func(task *models.DownloadTask) {
 		foundTasks = append(foundTasks, task)
 	})
@@ -265,7 +265,7 @@ func TestScanner_ScanChannel_ContextCancellation(t *testing.T) {
 
 	scanner := New(client)
 
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 0, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 0, IsChannel: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -274,15 +274,15 @@ func TestScanner_ScanChannel_ContextCancellation(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestResolvedChannel_IsChannel(t *testing.T) {
+func TestResolvedPeer_IsChannel(t *testing.T) {
 	// Test channel type
-	resolved := &ResolvedChannel{ChannelID: 123, AccessHash: 456, IsChannel: true}
+	resolved := &ResolvedPeer{ChannelID: 123, AccessHash: 456, IsChannel: true}
 	assert.True(t, resolved.IsChannel)
 	assert.Equal(t, int64(123), resolved.ChannelID)
 	assert.Equal(t, int64(456), resolved.AccessHash)
 
 	// Test group type
-	resolvedGroup := &ResolvedChannel{ChannelID: 789, AccessHash: 0, IsChannel: false}
+	resolvedGroup := &ResolvedPeer{ChannelID: 789, AccessHash: 0, IsChannel: false}
 	assert.False(t, resolvedGroup.IsChannel)
 	assert.Equal(t, int64(789), resolvedGroup.ChannelID)
 }

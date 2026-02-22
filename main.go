@@ -19,6 +19,20 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// setupSignalHandler creates a context that is cancelled on SIGINT/SIGTERM.
+func setupSignalHandler() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\nReceived interrupt signal, shutting down...")
+		signal.Stop(sigChan)
+		cancel()
+	}()
+	return ctx, cancel
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -154,6 +168,8 @@ func runScan(args []string) {
 			scanner.NewAdapter(tgClient.Raw()),
 			scanner.WithDB(database),
 			scanner.WithRawClient(tgClient.Raw().API()),
+			scanner.WithBatchSize(cfg.ScanBatchSize),
+			scanner.WithWatchPollLimit(cfg.WatchPollLimit),
 		)
 
 		// Resolve the source (handles usernames, peer IDs like -100XXX, and numeric IDs)
@@ -217,18 +233,9 @@ func runScan(args []string) {
 		return nil
 	}
 
-	// Create context that can be cancelled
-	ctx, cancel := context.WithCancel(context.Background())
+	// Create context with signal handling
+	ctx, cancel := setupSignalHandler()
 	defer cancel()
-
-	// Handle interrupt signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Println("\nReceived interrupt signal, shutting down...")
-		cancel()
-	}()
 
 	if err := tgClient.Start(ctx, scanCallback); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -284,16 +291,9 @@ func runDownload(args []string) {
 
 	tgClient := telegram.NewClient(cfg)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Create context with signal handling
+	ctx, cancel := setupSignalHandler()
 	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Println("\nReceived interrupt signal, shutting down...")
-		cancel()
-	}()
 
 	downloadCallback := func(ctx context.Context) error {
 		return downloadFromDatabase(ctx, database, tgClient, cfg, log, *watch)
@@ -335,10 +335,11 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 		log.Info().Int("batch", batchNum).Int("count", len(files)).Msg("Starting downloads")
 
 		api := tgClient.Raw().API()
-		poolCtx, poolCancel := context.WithCancel(context.Background())
+		poolCtx, poolCancel := context.WithCancel(ctx)
 		pool := downloader.NewPool(cfg.Workers, database, poolCtx).
 			WithClient(api).
-			WithDownloadPath(cfg.DownloadPath)
+			WithDownloadPath(cfg.DownloadPath).
+			WithDownloadTimeout(cfg.DownloadTimeout)
 
 		pool.Start()
 
@@ -378,7 +379,7 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 				return nil
 			}
 			log.Info().Int("remaining", len(remaining)).Int("batch", batchNum).Msg("More files pending, waiting before continuing...")
-			time.Sleep(3 * time.Second)
+			time.Sleep(time.Duration(cfg.RetryDelay) * time.Second)
 		} else {
 			log.Info().Int("poll_interval", cfg.DownloadPollInterval).Msg("Waiting for new files...")
 			time.Sleep(time.Duration(cfg.DownloadPollInterval) * time.Second)

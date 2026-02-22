@@ -91,7 +91,9 @@ func (c *Client) GetMe(ctx context.Context) (*tg.User, error) {
 	return c.client.Self(ctx)
 }
 
-// Close is a placeholder - the gotd client manages its own lifecycle.
+// Close is a no-op because the gotd client manages its own lifecycle via the Run() method.
+// The connection is automatically closed when the context passed to Start() is cancelled
+// or when the callback function returns. This method exists for interface compatibility.
 func (c *Client) Close() error {
 	return nil
 }

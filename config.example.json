@@ -5,5 +5,11 @@
   "database_path": "telegram_files.db",
   "download_path": "./downloaded_files",
   "workers": 5,
-  "log_level": "info"
+  "log_level": "info",
+  "scan_poll_interval": 30,
+  "download_poll_interval": 30,
+  "download_timeout": 600,
+  "scan_batch_size": 100,
+  "watch_poll_limit": 10,
+  "retry_delay": 3
 }

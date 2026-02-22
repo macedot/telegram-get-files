@@ -39,9 +39,11 @@ func (d *dialogClient) MessagesGetHistory(ctx context.Context, request *tg.Messa
 
 // Scanner handles scanning Telegram channels for media files.
 type Scanner struct {
-	client    DialogClient
-	rawClient *tg.Client
-	db        *db.DB
+	client         DialogClient
+	rawClient      *tg.Client
+	db             *db.DB
+	batchSize      int // number of messages per batch
+	watchPollLimit int // number of messages to fetch per poll in watch mode
 }
 
 // Option is a functional option for configuring Scanner.
@@ -61,9 +63,31 @@ func WithRawClient(rawClient *tg.Client) Option {
 	}
 }
 
+// WithBatchSize sets the batch size for scanning.
+func WithBatchSize(size int) Option {
+	return func(s *Scanner) {
+		if size > 0 {
+			s.batchSize = size
+		}
+	}
+}
+
+// WithWatchPollLimit sets the message limit for watch mode polls.
+func WithWatchPollLimit(limit int) Option {
+	return func(s *Scanner) {
+		if limit > 0 {
+			s.watchPollLimit = limit
+		}
+	}
+}
+
 // New creates a new scanner instance.
 func New(client DialogClient, opts ...Option) *Scanner {
-	s := &Scanner{client: client}
+	s := &Scanner{
+		client:         client,
+		batchSize:      100,
+		watchPollLimit: 10,
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -116,7 +140,7 @@ func (s *Scanner) ListChannels(ctx context.Context) ([]*models.Channel, error) {
 }
 
 // ScanChannel scans a channel for media files and processes each file via callback.
-func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, onFile func(*models.DownloadTask)) error {
+func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedPeer, onFile func(*models.DownloadTask)) error {
 	log := logger.GetLogger()
 	log.Info().Int64("channel_id", resolved.ChannelID).Int64("access_hash", resolved.AccessHash).Msg("Scanning channel...")
 
@@ -124,7 +148,6 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 
 	totalCount := 0
 	offsetID := 0
-	batchSize := 100
 
 	for {
 		select {
@@ -135,7 +158,7 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 
 		history, err := s.client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:     inputPeer,
-			Limit:    batchSize,
+			Limit:    s.batchSize,
 			OffsetID: offsetID,
 		})
 		if err != nil {
@@ -186,7 +209,7 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 			offsetID = msg.ID
 		}
 
-		if len(messages) < batchSize {
+		if len(messages) < s.batchSize {
 			break
 		}
 	}
@@ -197,7 +220,7 @@ func (s *Scanner) ScanChannel(ctx context.Context, resolved *ResolvedChannel, on
 
 // Watch listens for new messages with media in a channel/group.
 // pollInterval is in seconds.
-func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInterval int, onFile func(*models.DownloadTask)) error {
+func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedPeer, pollInterval int, onFile func(*models.DownloadTask)) error {
 	log := logger.GetLogger()
 	log.Info().Int64("channel_id", resolved.ChannelID).Int("poll_interval", pollInterval).Msg("Watching for new files...")
 
@@ -212,62 +235,67 @@ func (s *Scanner) Watch(ctx context.Context, resolved *ResolvedChannel, pollInte
 		default:
 		}
 
-		history, err := s.client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-			Peer:     inputPeer,
-			Limit:    10,
-			OffsetID: lastMessageID,
-		})
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to get history while watching")
-			time.Sleep(30 * time.Second)
-			continue
-		}
+		// Recover from panics in onFile callback or API calls
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).Msg("Recovered from panic in Watch loop")
+				}
+			}()
 
-		messages, err := s.extractMessages(history)
-		if err != nil {
-			log.Warn().Str("type", fmt.Sprintf("%T", history)).Msg("Unknown history type")
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(pollInterval) * time.Second):
+			history, err := s.client.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+				Peer:     inputPeer,
+				Limit:    s.watchPollLimit,
+				OffsetID: lastMessageID,
+			})
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to get history while watching")
+				return
 			}
-			continue
-		}
 
-		newMessages := []tg.MessageClass{}
-		for _, msg := range messages {
-			if msg, ok := msg.(*tg.Message); ok {
-				if msg.ID > lastMessageID {
-					newMessages = append(newMessages, msg)
+			messages, err := s.extractMessages(history)
+			if err != nil {
+				log.Warn().Str("type", fmt.Sprintf("%T", history)).Msg("Unknown history type")
+				return
+			}
+
+			newMessages := []tg.MessageClass{}
+			for _, msg := range messages {
+				if msg, ok := msg.(*tg.Message); ok {
+					if msg.ID > lastMessageID {
+						newMessages = append(newMessages, msg)
+					}
 				}
 			}
-		}
 
-		for i := len(newMessages) - 1; i >= 0; i-- {
-			msg := newMessages[i]
-			message, ok := msg.(*tg.Message)
-			if !ok {
-				continue
+			for i := len(newMessages) - 1; i >= 0; i-- {
+				msg := newMessages[i]
+				message, ok := msg.(*tg.Message)
+				if !ok {
+					continue
+				}
+
+				if message.Media == nil {
+					continue
+				}
+
+				task := extractMediaInfo(message, resolved.ChannelID)
+				if task != nil {
+					log.Debug().Str("file", task.FileName).Int("message_id", task.MessageID).Msg("New file detected")
+					if onFile != nil {
+						onFile(task)
+					}
+				}
+
+				if message.ID > lastMessageID {
+					lastMessageID = message.ID
+				}
 			}
 
-			if message.Media == nil {
-				continue
+			if len(newMessages) > 0 {
+				log.Debug().Int("new_messages", len(newMessages)).Msg("Checked for new messages")
 			}
-
-			task := extractMediaInfo(message, resolved.ChannelID)
-			if task != nil {
-				log.Debug().Str("file", task.FileName).Int("message_id", task.MessageID).Msg("New file detected")
-				onFile(task)
-			}
-
-			if message.ID > lastMessageID {
-				lastMessageID = message.ID
-			}
-		}
-
-		if len(newMessages) > 0 {
-			log.Debug().Int("new_messages", len(newMessages)).Msg("Checked for new messages")
-		}
+		}()
 
 		select {
 		case <-ctx.Done():
@@ -307,13 +335,31 @@ func extractMediaInfo(message *tg.Message, channelID int64) *models.DownloadTask
 			}
 		}
 
+		// Handle empty filename - generate one based on file ID and MIME type
+		if task.FileName == "" {
+			ext := getExtensionFromMime(doc.MimeType)
+			task.FileName = fmt.Sprintf("document_%d%s", doc.ID, ext)
+			task.OriginalName = task.FileName
+		}
+
 	case *tg.MessageMediaPhoto:
 		photo, ok := media.Photo.(*tg.Photo)
 		if !ok {
 			return nil
 		}
 		task.FileID = fmt.Sprintf("%d", photo.ID)
-		task.FileName = fmt.Sprintf("photo_%d.jpg", message.ID)
+
+		// Determine photo extension from available sizes
+		ext := ".jpg" // default
+		for _, size := range photo.Sizes {
+			switch size.(type) {
+			case *tg.PhotoSize:
+				// Photos are typically JPEG
+			case *tg.PhotoSizeProgressive:
+				// Progressive photos are also typically JPEG
+			}
+		}
+		task.FileName = fmt.Sprintf("photo_%d%s", message.ID, ext)
 		task.OriginalName = task.FileName
 
 	default:
@@ -323,8 +369,50 @@ func extractMediaInfo(message *tg.Message, channelID int64) *models.DownloadTask
 	return task
 }
 
-// ResolvedChannel holds the resolved channel ID and access hash.
-type ResolvedChannel struct {
+// getExtensionFromMime returns a file extension for common MIME types.
+func getExtensionFromMime(mime string) string {
+	switch mime {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/webm":
+		return ".webm"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/ogg":
+		return ".ogg"
+	case "application/pdf":
+		return ".pdf"
+	case "application/zip":
+		return ".zip"
+	case "application/x-rar-compressed":
+		return ".rar"
+	case "application/x-7z-compressed":
+		return ".7z"
+	default:
+		if mime != "" {
+			// Try to extract extension from MIME type
+			if idx := len(mime) - 1; idx > 0 {
+				for i := idx; i >= 0; i-- {
+					if mime[i] == '/' {
+						return "." + mime[i+1:]
+					}
+				}
+			}
+		}
+		return ""
+	}
+}
+
+// ResolvedPeer holds the resolved peer ID and access hash.
+type ResolvedPeer struct {
 	ChannelID  int64
 	AccessHash int64
 	IsChannel  bool
@@ -339,7 +427,7 @@ func (s *Scanner) ResolveChannel(ctx context.Context, identifier string) (int64,
 }
 
 // ResolveChannelWithHash resolves a source (channel or group) and returns its ID along with access hash.
-func (s *Scanner) ResolveChannelWithHash(ctx context.Context, identifier string) (*ResolvedChannel, error) {
+func (s *Scanner) ResolveChannelWithHash(ctx context.Context, identifier string) (*ResolvedPeer, error) {
 	// Try username first
 	resolved, err := s.resolveByUsername(ctx, identifier)
 	if err == nil {
@@ -356,7 +444,7 @@ func (s *Scanner) ResolveChannelWithHash(ctx context.Context, identifier string)
 
 	if s.rawClient == nil {
 		if identifier == "testchannel" {
-			return &ResolvedChannel{ChannelID: -1001234567890, AccessHash: 0, IsChannel: true}, nil
+			return &ResolvedPeer{ChannelID: -1001234567890, AccessHash: 0, IsChannel: true}, nil
 		}
 		return nil, fmt.Errorf("channel not found: %s", identifier)
 	}
@@ -364,7 +452,7 @@ func (s *Scanner) ResolveChannelWithHash(ctx context.Context, identifier string)
 	return nil, fmt.Errorf("channel not found: %s", identifier)
 }
 
-func (s *Scanner) resolveByUsername(ctx context.Context, identifier string) (*ResolvedChannel, error) {
+func (s *Scanner) resolveByUsername(ctx context.Context, identifier string) (*ResolvedPeer, error) {
 	sender := message.NewSender(s.rawClient)
 	peer, err := sender.Resolve(identifier).AsInputPeer(ctx)
 	if err != nil {
@@ -373,13 +461,13 @@ func (s *Scanner) resolveByUsername(ctx context.Context, identifier string) (*Re
 
 	switch p := peer.(type) {
 	case *tg.InputPeerChannel:
-		return &ResolvedChannel{
+		return &ResolvedPeer{
 			ChannelID:  p.ChannelID,
 			AccessHash: p.AccessHash,
 			IsChannel:  true,
 		}, nil
 	case *tg.InputPeerChat:
-		return &ResolvedChannel{
+		return &ResolvedPeer{
 			ChannelID:  p.ChatID,
 			AccessHash: 0,
 			IsChannel:  false,
@@ -397,7 +485,7 @@ func (s *Scanner) resolveByUsername(ctx context.Context, identifier string) (*Re
 		}
 		chat := chats[0]
 		if channel, ok := chat.(*tg.Channel); ok {
-			return &ResolvedChannel{
+			return &ResolvedPeer{
 				ChannelID:  channel.GetID(),
 				AccessHash: channel.AccessHash,
 				IsChannel:  true,
@@ -409,7 +497,7 @@ func (s *Scanner) resolveByUsername(ctx context.Context, identifier string) (*Re
 	}
 }
 
-func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*ResolvedChannel, error) {
+func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*ResolvedPeer, error) {
 	// Try to parse as numeric ID
 	var id int64
 	_, err := fmt.Sscanf(identifier, "%d", &id)
@@ -440,7 +528,7 @@ func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*Re
 		switch c := chat.(type) {
 		case *tg.Channel:
 			if c.GetID() == id || -1000000000000-c.GetID() == id || -c.GetID() == id {
-				return &ResolvedChannel{
+				return &ResolvedPeer{
 					ChannelID:  c.GetID(),
 					AccessHash: c.AccessHash,
 					IsChannel:  true,
@@ -448,7 +536,7 @@ func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*Re
 			}
 		case *tg.Chat:
 			if c.GetID() == id || -c.GetID() == id {
-				return &ResolvedChannel{
+				return &ResolvedPeer{
 					ChannelID:  c.GetID(),
 					AccessHash: 0,
 					IsChannel:  false,
@@ -460,8 +548,8 @@ func (s *Scanner) resolveByDialogID(ctx context.Context, identifier string) (*Re
 	return nil, fmt.Errorf("chat not found with ID: %d", id)
 }
 
-// buildInputPeer constructs the appropriate InputPeer for the given resolved channel.
-func (s *Scanner) buildInputPeer(resolved *ResolvedChannel) tg.InputPeerClass {
+// buildInputPeer constructs the appropriate InputPeer for the given resolved peer.
+func (s *Scanner) buildInputPeer(resolved *ResolvedPeer) tg.InputPeerClass {
 	if resolved.IsChannel {
 		return &tg.InputPeerChannel{
 			ChannelID:  resolved.ChannelID,

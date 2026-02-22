@@ -18,6 +18,10 @@ type Config struct {
 	LogLevel             string `json:"log_level"`
 	ScanPollInterval     int    `json:"scan_poll_interval"`
 	DownloadPollInterval int    `json:"download_poll_interval"`
+	DownloadTimeout      int    `json:"download_timeout"`      // seconds, default 600
+	ScanBatchSize        int    `json:"scan_batch_size"`       // default 100
+	WatchPollLimit       int    `json:"watch_poll_limit"`      // default 10
+	RetryDelay           int    `json:"retry_delay"`           // seconds, default 3
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -30,6 +34,10 @@ func DefaultConfig() *Config {
 		LogLevel:             "info",
 		ScanPollInterval:     30,
 		DownloadPollInterval: 30,
+		DownloadTimeout:      600,
+		ScanBatchSize:        100,
+		WatchPollLimit:       10,
+		RetryDelay:           3,
 	}
 }
 
@@ -69,6 +77,18 @@ func (c *Config) Validate() error {
 	if c.DownloadPollInterval < 1 {
 		c.DownloadPollInterval = 30
 	}
+	if c.DownloadTimeout < 1 {
+		c.DownloadTimeout = 600
+	}
+	if c.ScanBatchSize < 1 {
+		c.ScanBatchSize = 100
+	}
+	if c.WatchPollLimit < 1 {
+		c.WatchPollLimit = 10
+	}
+	if c.RetryDelay < 1 {
+		c.RetryDelay = 3
+	}
 	return nil
 }
 
@@ -84,6 +104,10 @@ func SaveExample(path string) error {
 		LogLevel:             "info",
 		ScanPollInterval:     30,
 		DownloadPollInterval: 30,
+		DownloadTimeout:      600,
+		ScanBatchSize:        100,
+		WatchPollLimit:       10,
+		RetryDelay:           3,
 	}
 
 	data, err := json.MarshalIndent(example, "", "  ")

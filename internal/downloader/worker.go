@@ -22,27 +22,29 @@ import (
 
 // Pool manages a pool of download workers.
 type Pool struct {
-	workers      int
-	db           *db.DB
-	api          *tg.Client
-	downloadPath string
-	queue        chan *models.DownloadTask
-	wg           sync.WaitGroup
-	ctx          context.Context
-	cancel       context.CancelFunc
-	mu           sync.Mutex
-	stopped      bool
+	workers         int
+	db              *db.DB
+	api             *tg.Client
+	downloadPath    string
+	downloadTimeout int // seconds
+	queue           chan *models.DownloadTask
+	wg              sync.WaitGroup
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.Mutex
+	stopped         bool
 }
 
 // NewPool creates a new download worker pool.
 func NewPool(workers int, database *db.DB, ctx context.Context) *Pool {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Pool{
-		workers: workers,
-		db:      database,
-		queue:   make(chan *models.DownloadTask, 100),
-		ctx:     ctx,
-		cancel:  cancel,
+		workers:         workers,
+		db:              database,
+		downloadTimeout: 600, // default 10 minutes
+		queue:           make(chan *models.DownloadTask, 100),
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
@@ -55,6 +57,14 @@ func (p *Pool) WithClient(api *tg.Client) *Pool {
 // WithDownloadPath sets the download path for the pool.
 func (p *Pool) WithDownloadPath(path string) *Pool {
 	p.downloadPath = path
+	return p
+}
+
+// WithDownloadTimeout sets the download timeout in seconds.
+func (p *Pool) WithDownloadTimeout(timeout int) *Pool {
+	if timeout > 0 {
+		p.downloadTimeout = timeout
+	}
 	return p
 }
 
@@ -102,8 +112,13 @@ func (p *Pool) Submit(task *models.DownloadTask) error {
 
 // worker is the main loop for each download worker.
 func (p *Pool) worker(id int) {
-	defer p.wg.Done()
 	log := logger.GetLogger()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().Interface("panic", r).Int("worker", id).Msg("Worker panicked, recovering")
+		}
+		p.wg.Done()
+	}()
 
 	for {
 		select {
@@ -185,11 +200,16 @@ func (p *Pool) downloadTask(task *models.DownloadTask) error {
 	}
 	defer file.Close()
 
+	// Compute hash during download using MultiWriter to avoid double I/O
+	hasher := sha256.New()
+	multiWriter := io.MultiWriter(file, hasher)
+
 	log.Debug().Int64("file_id", doc.ID).Int64("access_hash", doc.AccessHash).Msg("Starting file download")
 
-	downloadCtx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	// Use pool context as parent for proper cancellation on shutdown
+	downloadCtx, cancel := context.WithTimeout(p.ctx, time.Duration(p.downloadTimeout)*time.Second)
 	defer cancel()
-	_, err = downloader.NewDownloader().Download(p.api, location).Stream(downloadCtx, file)
+	_, err = downloader.NewDownloader().Download(p.api, location).Stream(downloadCtx, multiWriter)
 
 	if err != nil {
 		os.Remove(tempPath)
@@ -206,11 +226,8 @@ func (p *Pool) downloadTask(task *models.DownloadTask) error {
 		return fmt.Errorf("failed to rename file: %w", err)
 	}
 
-	hash, err := ComputeHash(filePath)
-	if err != nil {
-		log.Error().Err(err).Str("file", fileName).Msg("Failed to compute hash")
-		hash = ""
-	}
+	// Hash was computed during download
+	hash := fmt.Sprintf("%x", hasher.Sum(nil))
 
 	if p.db != nil {
 		if err := p.db.UpdateCompleted(task.ChannelID, task.MessageID, fileName, filePath, hash); err != nil {
@@ -309,7 +326,8 @@ func validatePath(targetPath, downloadDir string) error {
 
 // fetchFreshDocument fetches the current document from Telegram to get fresh file reference.
 func (p *Pool) fetchFreshDocument(task *models.DownloadTask) (*tg.Document, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Use pool context for proper cancellation on shutdown
+	ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
 	defer cancel()
 
 	msgs, err := p.api.MessagesGetMessages(ctx, []tg.InputMessageClass{&tg.InputMessageID{ID: task.MessageID}})
