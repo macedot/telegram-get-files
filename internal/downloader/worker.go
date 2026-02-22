@@ -23,7 +23,7 @@ import (
 // Pool manages a pool of download workers.
 type Pool struct {
 	workers         int
-	db              *db.DB
+	db              db.Database
 	api             *tg.Client
 	downloadPath    string
 	downloadTimeout int // seconds
@@ -36,7 +36,7 @@ type Pool struct {
 }
 
 // NewPool creates a new download worker pool.
-func NewPool(workers int, database *db.DB, ctx context.Context) *Pool {
+func NewPool(workers int, database db.Database, ctx context.Context) *Pool {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Pool{
 		workers:         workers,
@@ -51,6 +51,12 @@ func NewPool(workers int, database *db.DB, ctx context.Context) *Pool {
 // WithClient sets the Telegram API client for the pool.
 func (p *Pool) WithClient(api *tg.Client) *Pool {
 	p.api = api
+	return p
+}
+
+// WithDB sets the database for the pool.
+func (p *Pool) WithDB(database db.Database) *Pool {
+	p.db = database
 	return p
 }
 
