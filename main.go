@@ -353,7 +353,9 @@ func downloadFromDatabase(ctx context.Context, database *db.DB, tgClient *telegr
 				FileID:       file.FileID,
 				FilePath:     filePath,
 			}
-			pool.Submit(task)
+			if err := pool.Submit(task); err != nil {
+				log.Warn().Err(err).Int("message_id", task.MessageID).Msg("Failed to submit task, pool shutting down")
+			}
 		}
 
 		pool.Stop()

@@ -7,8 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
@@ -27,6 +30,8 @@ type Pool struct {
 	wg           sync.WaitGroup
 	ctx          context.Context
 	cancel       context.CancelFunc
+	mu           sync.Mutex
+	stopped      bool
 }
 
 // NewPool creates a new download worker pool.
@@ -62,17 +67,36 @@ func (p *Pool) Start() {
 }
 
 // Stop signals all workers to stop and waits for them to finish.
+// Safe to call multiple times.
 func (p *Pool) Stop() {
-	p.cancel()
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.stopped = true
+	p.mu.Unlock()
+
 	close(p.queue)
 	p.wg.Wait()
+	p.cancel()
 }
 
 // Submit adds a task to the download queue.
-func (p *Pool) Submit(task *models.DownloadTask) {
+// Returns error if pool is stopped or context cancelled.
+func (p *Pool) Submit(task *models.DownloadTask) error {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return fmt.Errorf("pool is stopped")
+	}
+	p.mu.Unlock()
+
 	select {
 	case p.queue <- task:
+		return nil
 	case <-p.ctx.Done():
+		return p.ctx.Err()
 	}
 }
 
@@ -89,11 +113,6 @@ func (p *Pool) worker(id int) {
 			}
 			if err := p.downloadTask(task); err != nil {
 				log.Error().Err(err).Int("worker", id).Int("message_id", task.MessageID).Msg("Download failed")
-				if p.db != nil {
-					if err := p.db.UpdateFailed(task.ChannelID, task.MessageID); err != nil {
-						log.Error().Err(err).Int("message_id", task.MessageID).Msg("Failed to mark download as failed in database")
-					}
-				}
 			}
 		case <-p.ctx.Done():
 			return
@@ -141,8 +160,14 @@ func (p *Pool) downloadTask(task *models.DownloadTask) error {
 		FileReference: doc.FileReference,
 	}
 
-	fileName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), task.FileName)
+	cleanName := sanitizeFilename(task.FileName)
+	fileName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), cleanName)
 	filePath := filepath.Join(p.downloadPath, fileName)
+
+	if err := validatePath(filePath, p.downloadPath); err != nil {
+		log.Error().Err(err).Str("original", task.FileName).Msg("Path validation failed")
+		return fmt.Errorf("invalid file path: %w", err)
+	}
 
 	if err := EnsureDir(filePath); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -223,6 +248,66 @@ func FileExists(path string) bool {
 func EnsureDir(path string) error {
 	dir := filepath.Dir(path)
 	return os.MkdirAll(dir, 0755)
+}
+
+// sanitizeFilename removes path components and dangerous filesystem characters
+// while preserving unicode characters for international filename support.
+func sanitizeFilename(name string) string {
+	// Replace backslashes with forward slashes for consistent handling
+	name = strings.ReplaceAll(name, "\\", "/")
+
+	// Remove any path components (handles / and .. sequences)
+	name = filepath.Base(name)
+
+	// Replace control characters with underscores
+	result := strings.Builder{}
+	for _, r := range name {
+		switch {
+		case unicode.IsControl(r):
+			result.WriteRune('_')
+		case r == 0:
+			result.WriteRune('_')
+		default:
+			result.WriteRune(r)
+		}
+	}
+	name = result.String()
+
+	// Limit length to prevent filesystem issues
+	if len(name) > 200 {
+		for i := 200; i > 0; i-- {
+			if utf8.RuneStart(name[i]) {
+				name = name[:i]
+				break
+			}
+		}
+	}
+
+	// Prevent empty, dot-only, or slash-only filenames
+	if name == "" || name == "." || name == ".." || name == "/" {
+		name = "download"
+	}
+
+	return name
+}
+
+// validatePath ensures the target path is within the allowed download directory.
+func validatePath(targetPath, downloadDir string) error {
+	absTarget, err := filepath.Abs(targetPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve target path: %w", err)
+	}
+
+	absDownload, err := filepath.Abs(downloadDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve download path: %w", err)
+	}
+
+	if !strings.HasPrefix(absTarget, absDownload+string(filepath.Separator)) {
+		return fmt.Errorf("path traversal attempt detected")
+	}
+
+	return nil
 }
 
 // fetchFreshDocument fetches the current document from Telegram to get fresh file reference.
